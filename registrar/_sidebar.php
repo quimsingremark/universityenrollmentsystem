@@ -1,0 +1,2 @@
+<?php include '../config/helpers.php'; ?>
+<div class="sidebar"><h2>Registrar</h2><p><?php echo e($_SESSION['fullname'] ?? ''); ?></p><a href="dashboard.php">Dashboard</a><a href="confirm_students.php">Confirm Students</a><a href="assign_subject.php">Assign Subject to Professor</a><a href="confirm_enrollment.php">Confirm Enrollments</a><a href="add_professor.php">Add Professor</a><a href="../auth/logout.php">Logout</a></div>
