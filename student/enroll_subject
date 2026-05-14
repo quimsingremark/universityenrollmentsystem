@@ -1,0 +1,132 @@
+<?php
+session_start();
+include '../config/database.php';
+
+if (!isset($_SESSION['role']) || $_SESSION['role'] != 'student') {
+    header("Location: ../auth/login.php");
+    exit();
+}
+
+$message = '';
+$user_id = intval($_SESSION['user_id']);
+$stmt = $conn->prepare("SELECT id, department_id, program, year_level, semester_level FROM students WHERE user_id = ? LIMIT 1");
+$stmt->bind_param("i", $user_id);
+$stmt->execute();
+$student = $stmt->get_result()->fetch_assoc();
+$student_id = intval($student['id'] ?? 0);
+$department_id = intval($student['department_id'] ?? 0);
+$year_level = intval($student['year_level'] ?? 1);
+$semester_level = intval($student['semester_level'] ?? 1);
+$program = $student['program'] ?? 'BSCS';
+
+if (isset($_POST['submit'])) {
+    $selected_sections = $_POST['section_ids'] ?? [];
+    $semester = "Year {$year_level} - Semester {$semester_level}";
+
+    if (empty($selected_sections)) {
+        $message = 'Please select at least one subject section to pre-register.';
+    } else {
+        $successCount = 0;
+        $errorMessages = [];
+
+        foreach ($selected_sections as $selected_section_id) {
+            $section_id = intval($selected_section_id);
+
+            $sectionCheck = $conn->prepare("\n                SELECT cs.id AS section_id, cs.section, c.id AS course_id, c.prerequisite_course_id, c.course_code, c.title\n                FROM course_sections cs\n                INNER JOIN courses c ON cs.course_id = c.id\n                WHERE cs.id=?\n                AND c.year_level=? AND c.semester_level=?\n                AND (c.department_id=? OR ?=0)\n                AND (c.program=? OR c.program IS NULL OR c.program='')\n                LIMIT 1\n            ");
+            $sectionCheck->bind_param("iiiiis", $section_id, $year_level, $semester_level, $department_id, $department_id, $program);
+            $sectionCheck->execute();
+            $section = $sectionCheck->get_result()->fetch_assoc();
+
+            if (!$section) {
+                $errorMessages[] = 'One selected subject section is not available for your current college/program/year/semester.';
+                continue;
+            }
+
+            $course_id = intval($section['course_id']);
+            $subjectName = $section['course_code'] . ' - ' . $section['title'] . ' | Section ' . $section['section'];
+
+            $already = $conn->prepare("SELECT id, status FROM enrollments WHERE student_id=? AND course_id=? AND status IN ('Pending','Enrolled') LIMIT 1");
+            $already->bind_param("ii", $student_id, $course_id);
+            $already->execute();
+            $alreadyRow = $already->get_result()->fetch_assoc();
+
+            if ($alreadyRow) {
+                $errorMessages[] = $subjectName . ' already has a ' . $alreadyRow['status'] . ' record.';
+                continue;
+            }
+
+            $prereq = $section['prerequisite_course_id'] ?? null;
+            $canRequest = true;
+
+            if (!empty($prereq)) {
+                $check = $conn->prepare("SELECT id FROM enrollments WHERE student_id=? AND course_id=? AND remarks='PASSED' LIMIT 1");
+                $check->bind_param("ii", $student_id, $prereq);
+                $check->execute();
+                if ($check->get_result()->num_rows == 0) {
+                    $canRequest = false;
+                    $errorMessages[] = $subjectName . ' requires a prerequisite subject first.';
+                }
+            }
+
+            if ($canRequest) {
+                $ins = $conn->prepare("INSERT INTO enrollments(student_id, course_id, section_id, semester, status, remarks) VALUES(?, ?, ?, ?, 'Pending', 'PRE-REGISTERED')");
+                $ins->bind_param("iiis", $student_id, $course_id, $section_id, $semester);
+                if ($ins->execute()) {
+                    $successCount++;
+                } else {
+                    $errorMessages[] = 'Pre-registration error for ' . $subjectName . ': ' . $conn->error;
+                }
+            }
+        }
+
+        if ($successCount > 0) {
+            $message = $successCount . ' subject pre-registration request(s) sent to the registrar.';
+        }
+        if (!empty($errorMessages)) {
+            $message .= '<br>' . implode('<br>', array_map('htmlspecialchars', $errorMessages));
+        }
+    }
+}
+
+$sections = $conn->prepare("\nSELECT cs.id AS section_id, cs.section, cs.school_year, cs.semester_label, c.id AS course_id, c.course_code, c.title, c.credits, pre.course_code AS pre_code, u.fullname AS professor_name\nFROM course_sections cs\nINNER JOIN courses c ON cs.course_id = c.id\nINNER JOIN professors p ON cs.professor_id = p.id\nINNER JOIN users u ON p.user_id = u.id\nLEFT JOIN courses pre ON c.prerequisite_course_id = pre.id\nWHERE c.year_level = ?\nAND c.semester_level = ?\nAND (c.department_id = ? OR ? = 0)\nAND (c.program = ? OR c.program IS NULL OR c.program = '')\nAND c.id NOT IN (SELECT course_id FROM enrollments WHERE student_id = ? AND status IN ('Pending','Enrolled'))\nAND (c.prerequisite_course_id IS NULL OR EXISTS (SELECT 1 FROM enrollments e WHERE e.student_id = ? AND e.course_id = c.prerequisite_course_id AND e.remarks = 'PASSED'))\nORDER BY c.course_code, cs.section\n");
+$sections->bind_param("iiiisii", $year_level, $semester_level, $department_id, $department_id, $program, $student_id, $student_id);
+$sections->execute();
+$sectionResult = $sections->get_result();
+?>
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pre-Register Subjects</title>
+    <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<div class="form-container wide-form">
+    <a class="back-link" href="dashboard.php">&larr; Back to Dashboard</a>
+    <h1>Pre-Register Current Semester Subjects</h1>
+    <p>Showing only <?php echo htmlspecialchars($program); ?> Year <?php echo htmlspecialchars($year_level); ?> - Semester <?php echo htmlspecialchars($semester_level); ?> subject sections.</p>
+    <p class="help-text">Choose subject sections. Your choices will stay pending until the registrar confirms your pre-registration.</p>
+    <?php if($message): ?><div class="message"><?php echo $message; ?></div><?php endif; ?>
+    <form method="POST">
+        <label>Select Subject Sections</label>
+        <div class="checkbox-subject-list">
+            <?php if($sectionResult->num_rows > 0): ?>
+                <?php while($row = $sectionResult->fetch_assoc()): ?>
+                    <label class="subject-checkbox-card">
+                        <input type="checkbox" name="section_ids[]" value="<?php echo $row['section_id']; ?>">
+                        <div>
+                            <strong><?php echo htmlspecialchars($row['course_code']); ?></strong>
+                            <span><?php echo htmlspecialchars($row['title']); ?></span>
+                            <small><?php echo htmlspecialchars($row['credits'].' units | Section: '.$row['section'].' | Professor: '.$row['professor_name'].' | Prereq: '.($row['pre_code'] ?? 'None')); ?></small>
+                        </div>
+                    </label>
+                <?php endwhile; ?>
+            <?php else: ?>
+                <p class="empty">No subject sections available. Ask the registrar to assign subjects to professors and sections first.</p>
+            <?php endif; ?>
+        </div>
+        <button type="submit" name="submit">Send Pre-Registration to Registrar</button>
+    </form>
+</div>
+</body>
+</html>
